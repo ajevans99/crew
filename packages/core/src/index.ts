@@ -70,6 +70,37 @@ export function createWorkstream(db = getDatabase()): Workstream {
   return workstream;
 }
 
+export function listWorkstreams(db = getDatabase()): Workstream[] {
+  const rows = db
+    .prepare(
+      `SELECT id, created_at, status
+       FROM workstreams
+       ORDER BY created_at DESC`
+    )
+    .all() as WorkstreamRow[];
+
+  return rows.map(toWorkstream);
+}
+
+export function getWorkstream(
+  workstreamId: string,
+  db = getDatabase()
+): Workstream {
+  const row = db
+    .prepare(
+      `SELECT id, created_at, status
+       FROM workstreams
+       WHERE id = ?`
+    )
+    .get(workstreamId) as WorkstreamRow | undefined;
+
+  if (!row) {
+    throw new WorkstreamNotFoundError(workstreamId);
+  }
+
+  return toWorkstream(row);
+}
+
 export function getEvents(
   workstreamId: string,
   db = getDatabase()
@@ -243,5 +274,13 @@ function toEvent(row: EventRow): WorkstreamEvent {
     type: row.type,
     message: row.message,
     timestamp: row.timestamp
+  };
+}
+
+function toWorkstream(row: WorkstreamRow): Workstream {
+  return {
+    id: row.id,
+    createdAt: row.created_at,
+    status: row.status
   };
 }

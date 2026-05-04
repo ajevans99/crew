@@ -2,6 +2,8 @@ import Fastify from "fastify";
 import {
   createWorkstream,
   getEvents,
+  getWorkstream,
+  listWorkstreams,
   runHelloCommand,
   WorkstreamNotFoundError,
   type WorkstreamEvent
@@ -15,10 +17,30 @@ const fastify = Fastify({ logger: true });
 const runningWorkstreams = new Set<string>();
 const subscribers = new Map<string, Set<(event: WorkstreamEvent) => void>>();
 
+fastify.get("/api/workstreams", async () => {
+  return { workstreams: listWorkstreams() };
+});
+
 fastify.post("/api/workstreams", async () => {
   const workstream = createWorkstream();
   return { id: workstream.id };
 });
+
+fastify.get<{ Params: WorkstreamParams }>(
+  "/api/workstreams/:id",
+  async (request, reply) => {
+    try {
+      return { workstream: getWorkstream(request.params.id) };
+    } catch (error) {
+      if (error instanceof WorkstreamNotFoundError) {
+        return reply.code(404).send({ error: "Workstream not found" });
+      }
+
+      request.log.error(error);
+      return reply.code(500).send({ error: "Failed to load workstream" });
+    }
+  }
+);
 
 fastify.post<{ Params: WorkstreamParams }>(
   "/api/workstreams/:id/run",

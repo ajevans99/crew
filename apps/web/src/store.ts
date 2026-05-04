@@ -1,11 +1,25 @@
 import { create } from "zustand";
+import { persist } from "zustand/middleware";
 
 type CrewState = {
-  workstreamId: string | null;
-  setWorkstreamId: (workstreamId: string) => void;
+  selectedWorkstreamId: string | null;
+  sidebarCollapsed: boolean;
+  setSelectedWorkstreamId: (workstreamId: string | null) => void;
+  toggleSidebar: () => void;
 };
 
-export const useCrewStore = create<CrewState>((set) => ({
-  workstreamId: null,
-  setWorkstreamId: (workstreamId) => set({ workstreamId })
-}));
+export const useCrewStore = create<CrewState>()(
+  persist(
+    (set) => ({
+      selectedWorkstreamId: null,
+      sidebarCollapsed: false,
+      setSelectedWorkstreamId: (selectedWorkstreamId) =>
+        set({ selectedWorkstreamId }),
+      toggleSidebar: () =>
+        set((state) => ({ sidebarCollapsed: !state.sidebarCollapsed }))
+    }),
+    {
+      name: "crew-ui"
+    }
+  )
+);
