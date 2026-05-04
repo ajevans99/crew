@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@crew/core": "workspace:*",
+    "@crew/sdk": "workspace:*",
     "@radix-ui/react-slot": "^1.1.1",
     "@tanstack/react-query": "^5.62.11",
     "@tanstack/react-router": "^1.95.0",

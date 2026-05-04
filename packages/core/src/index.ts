@@ -35,14 +35,17 @@ export type AgentRun = {
 export type WorkstreamEventActorType = "system" | "service" | "agent" | "user";
 
 export type WorkstreamEventType =
+  | "adapter.registered"
   | "workstream.created"
   | "service.started"
   | "service.output.chunk"
   | "service.stopped"
+  | "agent.run.requested"
   | "agent.run.started"
   | "agent.output.chunk"
   | "agent.run.completed"
   | "agent.run.failed"
+  | "message.sent"
   | "user.command.requested";
 
 export type WorkstreamEvent = {

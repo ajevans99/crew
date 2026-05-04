@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@crew/core": "workspace:*",
+    "@crew/sdk": "workspace:*",
     "fastify": "^5.2.1"
   },
   "devDependencies": {

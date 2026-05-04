@@ -18,6 +18,7 @@ import {
   type ServiceDefinition,
   type WorkstreamEvent
 } from "@crew/core";
+import type { ChannelAdapter, RuntimeAdapter } from "@crew/sdk";
 
 type WorkstreamParams = {
   id: string;
@@ -28,6 +29,11 @@ type ServiceParams = WorkstreamParams & {
 };
 
 type ServiceStatus = "stopped" | "starting" | "ready" | "failed";
+
+type RunRequestBody = {
+  runtimeAdapterId?: string;
+  prompt?: string;
+};
 
 type ManagedService = {
   definition: ServiceDefinition;
@@ -59,6 +65,65 @@ const serviceDefinitions: ServiceDefinition[] = [
 ];
 const copilotInspectPrompt = "Inspect this repo and summarize what you see";
 const copilotInspectCommand = `copilot --prompt "${copilotInspectPrompt}"`;
+const channelAdapters: ChannelAdapter[] = [
+  {
+    id: "local-ui",
+    displayName: "Local UI",
+    async sendMessage(input) {
+      const event = appendEvent({
+        workstreamId: input.threadId,
+        actorType: "user",
+        actorId: "local-ui",
+        type: "message.sent",
+        message: input.content,
+        payload: { threadId: input.threadId }
+      });
+      publishEvent(input.threadId, event);
+    }
+  }
+];
+const runtimeAdapters: RuntimeAdapter[] = [
+  {
+    id: "shell",
+    displayName: "Shell",
+    async startRun(input) {
+      const agentRun = createAgentRun(input.workstreamId, input.prompt);
+      startRuntimeProcess({
+        agentRun,
+        runtimeAdapterId: "shell",
+        command: "/bin/sh",
+        args: ["-lc", input.prompt],
+        cwd: input.cwd,
+        prompt: input.prompt
+      });
+      return { runId: agentRun.id };
+    }
+  },
+  {
+    id: "github-copilot",
+    displayName: "GitHub Copilot",
+    async startRun(input) {
+      const command = `copilot --prompt "${input.prompt}"`;
+      const agentRun = createAgentRun(input.workstreamId, command);
+      startRuntimeProcess({
+        agentRun,
+        runtimeAdapterId: "github-copilot",
+        command: "copilot",
+        args: ["--prompt", input.prompt],
+        cwd: input.cwd,
+        prompt: input.prompt
+      });
+      return { runId: agentRun.id };
+    }
+  }
+];
+
+fastify.get("/api/adapters", async () => {
+  return {
+    channelAdapters: channelAdapters.map(toAdapterView),
+    runtimeAdapters: runtimeAdapters.map(toAdapterView)
+  };
+});
 
 fastify.get("/api/workstreams", async () => {
   return { workstreams: listWorkstreams() };
@@ -66,6 +131,7 @@ fastify.get("/api/workstreams", async () => {
 
 fastify.post("/api/workstreams", async () => {
   const workstream = createWorkstream();
+  emitAdapterRegisteredEvents(workstream.id);
   return { id: workstream.id };
 });
 
@@ -131,9 +197,12 @@ fastify.post<{ Params: WorkstreamParams }>(
   "/api/workstreams/:id/agent-runs",
   async (request, reply) => {
     try {
-      const agentRun = createAgentRun(request.params.id, copilotInspectCommand);
-      startAgentRun(agentRun);
-      return { agentRun: updateAgentRunStatus(agentRun.id, "running") };
+      const run = await startRunWithAdapter({
+        workstreamId: request.params.id,
+        runtimeAdapterId: "github-copilot",
+        prompt: copilotInspectPrompt
+      });
+      return { agentRun: updateAgentRunStatus(run.runId, "running") };
     } catch (error) {
       if (error instanceof WorkstreamNotFoundError) {
         return reply.code(404).send({ error: "Workstream not found" });
@@ -141,6 +210,40 @@ fastify.post<{ Params: WorkstreamParams }>(
 
       request.log.error(error);
       return reply.code(500).send({ error: "Failed to start agent run" });
+    }
+  }
+);
+
+fastify.post<{ Params: WorkstreamParams; Body: RunRequestBody }>(
+  "/api/workstreams/:id/runs",
+  async (request, reply) => {
+    const runtimeAdapterId = request.body?.runtimeAdapterId;
+    const prompt = request.body?.prompt;
+
+    if (!runtimeAdapterId || !prompt?.trim()) {
+      return reply
+        .code(400)
+        .send({ error: "runtimeAdapterId and prompt are required" });
+    }
+
+    try {
+      const run = await startRunWithAdapter({
+        workstreamId: request.params.id,
+        runtimeAdapterId,
+        prompt: prompt.trim()
+      });
+      return { runId: run.runId };
+    } catch (error) {
+      if (error instanceof WorkstreamNotFoundError) {
+        return reply.code(404).send({ error: "Workstream not found" });
+      }
+
+      if (error instanceof AdapterNotFoundError) {
+        return reply.code(404).send({ error: "Runtime adapter not found" });
+      }
+
+      request.log.error(error);
+      return reply.code(500).send({ error: "Failed to start run" });
     }
   }
 );
@@ -296,22 +399,104 @@ function removeSubscriber(
   }
 }
 
-function startAgentRun(agentRun: AgentRun) {
+class AdapterNotFoundError extends Error {
+  constructor(id: string) {
+    super(`Adapter not found: ${id}`);
+    this.name = "AdapterNotFoundError";
+  }
+}
+
+function toAdapterView(adapter: Pick<ChannelAdapter | RuntimeAdapter, "id" | "displayName">) {
+  return {
+    id: adapter.id,
+    displayName: adapter.displayName
+  };
+}
+
+function emitAdapterRegisteredEvents(workstreamId: string) {
+  for (const adapter of [...channelAdapters, ...runtimeAdapters]) {
+    const event = appendEvent({
+      workstreamId,
+      actorType: "system",
+      actorId: adapter.id,
+      type: "adapter.registered",
+      message: `${adapter.displayName} registered`,
+      payload: {
+        adapterId: adapter.id,
+        displayName: adapter.displayName
+      }
+    });
+    publishEvent(workstreamId, event);
+  }
+}
+
+async function startRunWithAdapter({
+  workstreamId,
+  runtimeAdapterId,
+  prompt
+}: {
+  workstreamId: string;
+  runtimeAdapterId: string;
+  prompt: string;
+}) {
+  getWorkstream(workstreamId);
+  await channelAdapters[0].sendMessage({
+    threadId: workstreamId,
+    content: prompt
+  });
+
+  const runtimeAdapter = runtimeAdapters.find(
+    (adapter) => adapter.id === runtimeAdapterId
+  );
+  if (!runtimeAdapter) {
+    throw new AdapterNotFoundError(runtimeAdapterId);
+  }
+
+  return runtimeAdapter.startRun({
+    workstreamId,
+    cwd: repoRoot,
+    prompt
+  });
+}
+
+function startRuntimeProcess({
+  agentRun,
+  runtimeAdapterId,
+  command,
+  args,
+  cwd,
+  prompt
+}: {
+  agentRun: AgentRun;
+  runtimeAdapterId: string;
+  command: string;
+  args: string[];
+  cwd: string;
+  prompt: string;
+}) {
   if (activeAgentRuns.has(agentRun.id)) {
     return;
   }
 
   activeAgentRuns.add(agentRun.id);
+  logAgentEvent(
+    agentRun.id,
+    agentRun.workstreamId,
+    "agent.run.requested",
+    prompt,
+    { runtimeAdapterId, prompt }
+  );
   updateAgentRunStatus(agentRun.id, "running");
   logAgentEvent(
     agentRun.id,
     agentRun.workstreamId,
     "agent.run.started",
-    agentRun.command
+    agentRun.command,
+    { runtimeAdapterId, command, args, cwd }
   );
 
-  const child = spawn("copilot", ["--prompt", copilotInspectPrompt], {
-    cwd: repoRoot,
+  const child = spawn(command, args, {
+    cwd,
     stdio: ["ignore", "pipe", "pipe"]
   });
 
@@ -336,7 +521,8 @@ function startAgentRun(agentRun: AgentRun) {
       agentRun.id,
       agentRun.workstreamId,
       "agent.run.failed",
-      error.message
+      error.message,
+      { runtimeAdapterId }
     );
   });
 
@@ -354,7 +540,8 @@ function startAgentRun(agentRun: AgentRun) {
         agentRun.id,
         agentRun.workstreamId,
         "agent.run.completed",
-        `completed with code ${code}`
+        `completed with code ${code}`,
+        { runtimeAdapterId, code }
       );
       return;
     }
@@ -364,7 +551,8 @@ function startAgentRun(agentRun: AgentRun) {
       agentRun.id,
       agentRun.workstreamId,
       "agent.run.failed",
-      `failed with code ${code ?? "null"} and signal ${signal ?? "null"}`
+      `failed with code ${code ?? "null"} and signal ${signal ?? "null"}`,
+      { runtimeAdapterId, code, signal }
     );
   });
 }
@@ -417,8 +605,14 @@ function normalizeAgentOutput(output: string) {
 function logAgentEvent(
   agentRunId: string,
   workstreamId: string,
-  type: "agent.run.started" | "agent.output.chunk" | "agent.run.completed" | "agent.run.failed",
-  message: string
+  type:
+    | "agent.run.requested"
+    | "agent.run.started"
+    | "agent.output.chunk"
+    | "agent.run.completed"
+    | "agent.run.failed",
+  message: string,
+  payload?: unknown
 ) {
   const event = appendEvent({
     workstreamId,
@@ -426,7 +620,10 @@ function logAgentEvent(
     actorId: agentRunId,
     type,
     message,
-    payload: { agentRunId }
+    payload: {
+      agentRunId,
+      ...((payload && typeof payload === "object") ? payload : {})
+    }
   });
   publishEvent(workstreamId, event);
 }

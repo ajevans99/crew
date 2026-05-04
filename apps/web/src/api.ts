@@ -1,4 +1,9 @@
-import type { AgentRun, Workstream, WorkstreamEvent } from "@crew/core";
+import type {
+  AgentRun,
+  Workstream,
+  WorkstreamEvent
+} from "@crew/core";
+import type { ChannelAdapter, RuntimeAdapter } from "@crew/sdk";
 
 export type ServiceStatus = "stopped" | "starting" | "ready" | "failed";
 
@@ -13,6 +18,20 @@ export type WorkstreamService = {
   status: ServiceStatus;
   healthy: boolean;
 };
+
+export type AdapterView = Pick<ChannelAdapter | RuntimeAdapter, "id" | "displayName">;
+
+export async function listAdapters() {
+  const response = await fetch("/api/adapters");
+  if (!response.ok) {
+    throw new Error("Failed to load adapters");
+  }
+
+  return (await response.json()) as {
+    channelAdapters: AdapterView[];
+    runtimeAdapters: AdapterView[];
+  };
+}
 
 export async function listWorkstreams() {
   const response = await fetch("/api/workstreams");
@@ -132,4 +151,27 @@ export async function createAgentRun(workstreamId: string) {
 
   const data = (await response.json()) as { agentRun: AgentRun };
   return data.agentRun;
+}
+
+export async function createRun({
+  workstreamId,
+  runtimeAdapterId,
+  prompt
+}: {
+  workstreamId: string;
+  runtimeAdapterId: string;
+  prompt: string;
+}) {
+  const response = await fetch(`/api/workstreams/${workstreamId}/runs`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({ runtimeAdapterId, prompt })
+  });
+  if (!response.ok) {
+    throw new Error("Failed to start run");
+  }
+
+  return (await response.json()) as { runId: string };
 }

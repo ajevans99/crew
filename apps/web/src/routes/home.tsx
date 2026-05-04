@@ -7,12 +7,14 @@ import type {
   WorkstreamEventType,
   WorkstreamStatus
 } from "@crew/core";
+import type { RuntimeAdapter } from "@crew/sdk";
 import {
-  createAgentRun,
+  createRun,
   createWorkstream,
   getEvents,
   getWorkstream,
   listAgentRuns,
+  listAdapters,
   listServices,
   listWorkstreams,
   runCommand,
@@ -34,6 +36,8 @@ export function HomePage() {
     "all"
   );
   const [autoScroll, setAutoScroll] = useState(true);
+  const [runtimeAdapterId, setRuntimeAdapterId] = useState("shell");
+  const [runPrompt, setRunPrompt] = useState("echo hello");
   const timelineEndRef = useRef<HTMLDivElement | null>(null);
   const {
     selectedWorkstreamId,
@@ -45,6 +49,11 @@ export function HomePage() {
   const workstreamsQuery = useQuery({
     queryKey: ["workstreams"],
     queryFn: listWorkstreams
+  });
+
+  const adaptersQuery = useQuery({
+    queryKey: ["adapters"],
+    queryFn: listAdapters
   });
 
   const workstreams = workstreamsQuery.data ?? [];
@@ -154,8 +163,8 @@ export function HomePage() {
     }
   });
 
-  const createAgentRunMutation = useMutation({
-    mutationFn: createAgentRun,
+  const createRunMutation = useMutation({
+    mutationFn: createRun,
     onSuccess: () => {
       if (selectedWorkstreamId) {
         queryClient.invalidateQueries({
@@ -210,7 +219,8 @@ export function HomePage() {
     runCommandMutation.error ??
     startServiceMutation.error ??
     stopServiceMutation.error ??
-    createAgentRunMutation.error ??
+    createRunMutation.error ??
+    adaptersQuery.error ??
     workstreamsQuery.error ??
     selectedWorkstreamQuery.error ??
     servicesQuery.error ??
@@ -312,18 +322,6 @@ export function HomePage() {
                   ? "Running..."
                   : "Run Command"}
               </Button>
-              <Button
-                variant="outline"
-                onClick={() =>
-                  selectedWorkstreamId &&
-                  createAgentRunMutation.mutate(selectedWorkstreamId)
-                }
-                disabled={!selectedWorkstreamId || createAgentRunMutation.isPending}
-              >
-                {createAgentRunMutation.isPending
-                  ? "Starting Copilot..."
-                  : "Run Copilot Inspect"}
-              </Button>
             </div>
           </CardHeader>
 
@@ -374,10 +372,27 @@ export function HomePage() {
                   <div className="rounded-xl border bg-white p-4 shadow-sm">
                     <h2 className="font-semibold">Agent run</h2>
                     <p className="mt-2 text-sm text-slate-500">
-                      Run Copilot Inspect to capture the first agent output.
+                      Run a shell or GitHub Copilot adapter to capture output.
                     </p>
                   </div>
                 )}
+                <RunAgentPanel
+                  prompt={runPrompt}
+                  runtimeAdapterId={runtimeAdapterId}
+                  runtimeAdapters={adaptersQuery.data?.runtimeAdapters ?? []}
+                  running={createRunMutation.isPending}
+                  selectedWorkstreamId={selectedWorkstreamId}
+                  setPrompt={setRunPrompt}
+                  setRuntimeAdapterId={setRuntimeAdapterId}
+                  onRun={() =>
+                    selectedWorkstreamId &&
+                    createRunMutation.mutate({
+                      workstreamId: selectedWorkstreamId,
+                      runtimeAdapterId,
+                      prompt: runPrompt
+                    })
+                  }
+                />
               </div>
             ) : null}
 
@@ -480,6 +495,72 @@ function ServiceCard({
         ) : (
           <p className="text-slate-500">No service logs yet.</p>
         )}
+      </div>
+    </div>
+  );
+}
+
+function RunAgentPanel({
+  prompt,
+  runtimeAdapterId,
+  runtimeAdapters,
+  running,
+  selectedWorkstreamId,
+  setPrompt,
+  setRuntimeAdapterId,
+  onRun
+}: {
+  prompt: string;
+  runtimeAdapterId: string;
+  runtimeAdapters: Pick<RuntimeAdapter, "id" | "displayName">[];
+  running: boolean;
+  selectedWorkstreamId: string | null;
+  setPrompt: (prompt: string) => void;
+  setRuntimeAdapterId: (runtimeAdapterId: string) => void;
+  onRun: () => void;
+}) {
+  return (
+    <div className="rounded-xl border bg-white p-4 shadow-sm">
+      <div className="space-y-4">
+        <div>
+          <h2 className="font-semibold">Run Agent</h2>
+          <p className="mt-1 text-sm text-slate-500">
+            Pick a runtime adapter and send output to the timeline.
+          </p>
+        </div>
+
+        <label className="block space-y-2 text-sm">
+          <span className="font-medium">Runtime</span>
+          <select
+            className="w-full rounded-md border bg-white px-3 py-2"
+            value={runtimeAdapterId}
+            onChange={(event) => setRuntimeAdapterId(event.target.value)}
+          >
+            {runtimeAdapters.map((adapter) => (
+              <option key={adapter.id} value={adapter.id}>
+                {adapter.displayName}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <label className="block space-y-2 text-sm">
+          <span className="font-medium">Prompt</span>
+          <textarea
+            className="min-h-28 w-full rounded-md border px-3 py-2 font-mono text-sm"
+            value={prompt}
+            onChange={(event) => setPrompt(event.target.value)}
+            placeholder="echo hello"
+          />
+        </label>
+
+        <Button
+          className="w-full"
+          disabled={!selectedWorkstreamId || !prompt.trim() || running}
+          onClick={onRun}
+        >
+          {running ? "Running..." : "Run"}
+        </Button>
       </div>
     </div>
   );
@@ -663,7 +744,10 @@ function AgentRunCard({
 }) {
   const outputTranscript = formatAgentTranscript(
     events
-      .filter((event) => event.type === "agent.output.chunk")
+      .filter(
+        (event) =>
+          event.type === "agent.output.chunk" && event.actorId === agentRun.id
+      )
       .map((event) => event.message)
       .join("\n")
   );

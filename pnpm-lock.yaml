@@ -13,6 +13,9 @@ importers:
       '@crew/core':
         specifier: workspace:*
         version: link:../../packages/core
+      '@crew/sdk':
+        specifier: workspace:*
+        version: link:../../packages/sdk
       fastify:
         specifier: ^5.2.1
         version: 5.8.5
@@ -32,6 +35,9 @@ importers:
       '@crew/core':
         specifier: workspace:*
         version: link:../../packages/core
+      '@crew/sdk':
+        specifier: workspace:*
+        version: link:../../packages/sdk
       '@radix-ui/react-slot':
         specifier: ^1.1.1
         version: 1.2.4(@types/react@19.2.14)(react@19.2.5)
