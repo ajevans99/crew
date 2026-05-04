@@ -1,0 +1,11 @@
+{
+  "name": "crew",
+  "version": "0.0.0",
+  "private": true,
+  "packageManager": "pnpm@9.15.4",
+  "scripts": {
+    "dev": "pnpm --parallel --stream --filter @crew/daemon --filter @crew/web dev",
+    "build": "pnpm --filter @crew/web build",
+    "typecheck": "pnpm -r --if-present typecheck"
+  }
+}
