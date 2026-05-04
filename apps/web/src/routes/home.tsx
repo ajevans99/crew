@@ -5,8 +5,13 @@ import {
   createWorkstream,
   getEvents,
   getWorkstream,
+  listServices,
   listWorkstreams,
-  runCommand
+  runCommand,
+  startService,
+  stopService,
+  type ServiceStatus,
+  type WorkstreamService
 } from "@/api";
 import { useCrewStore } from "@/store";
 import { Button } from "@/components/ui/button";
@@ -41,6 +46,13 @@ export function HomePage() {
   const eventsQuery = useQuery({
     queryKey: ["events", selectedWorkstreamId],
     queryFn: () => getEvents(selectedWorkstreamId!),
+    enabled: selectedExists,
+    refetchInterval: 1000
+  });
+
+  const servicesQuery = useQuery({
+    queryKey: ["services", selectedWorkstreamId],
+    queryFn: () => listServices(selectedWorkstreamId!),
     enabled: selectedExists,
     refetchInterval: 1000
   });
@@ -91,13 +103,45 @@ export function HomePage() {
     }
   });
 
+  const startServiceMutation = useMutation({
+    mutationFn: startService,
+    onSuccess: () => {
+      if (selectedWorkstreamId) {
+        queryClient.invalidateQueries({
+          queryKey: ["services", selectedWorkstreamId]
+        });
+        queryClient.invalidateQueries({
+          queryKey: ["events", selectedWorkstreamId]
+        });
+      }
+    }
+  });
+
+  const stopServiceMutation = useMutation({
+    mutationFn: stopService,
+    onSuccess: () => {
+      if (selectedWorkstreamId) {
+        queryClient.invalidateQueries({
+          queryKey: ["services", selectedWorkstreamId]
+        });
+        queryClient.invalidateQueries({
+          queryKey: ["events", selectedWorkstreamId]
+        });
+      }
+    }
+  });
+
   const selectedWorkstream = selectedWorkstreamQuery.data;
   const events = eventsQuery.data ?? [];
+  const services = servicesQuery.data ?? [];
   const error =
     createWorkstreamMutation.error ??
     runCommandMutation.error ??
+    startServiceMutation.error ??
+    stopServiceMutation.error ??
     workstreamsQuery.error ??
     selectedWorkstreamQuery.error ??
+    servicesQuery.error ??
     eventsQuery.error;
 
   const canRun =
@@ -205,6 +249,42 @@ export function HomePage() {
               </p>
             ) : null}
 
+            {selectedWorkstreamId ? (
+              <div className="grid gap-4 lg:grid-cols-2">
+                {services.map((service) => (
+                  <ServiceCard
+                    key={service.name}
+                    service={service}
+                    logs={events
+                      .filter((event) =>
+                        event.message.startsWith(`[${service.name}]`)
+                      )
+                      .slice(-12)}
+                    startPending={
+                      startServiceMutation.isPending &&
+                      startServiceMutation.variables?.name === service.name
+                    }
+                    stopPending={
+                      stopServiceMutation.isPending &&
+                      stopServiceMutation.variables?.name === service.name
+                    }
+                    onStart={() =>
+                      startServiceMutation.mutate({
+                        workstreamId: selectedWorkstreamId,
+                        name: service.name
+                      })
+                    }
+                    onStop={() =>
+                      stopServiceMutation.mutate({
+                        workstreamId: selectedWorkstreamId,
+                        name: service.name
+                      })
+                    }
+                  />
+                ))}
+              </div>
+            ) : null}
+
             <div className="min-h-[24rem] flex-1 overflow-auto rounded-lg bg-slate-950 p-4 font-mono text-sm text-slate-100">
               {selectedWorkstreamId ? (
                 events.length > 0 ? (
@@ -244,6 +324,102 @@ function StatusBadge({ status }: { status: WorkstreamStatus }) {
       }`}
     >
       {status}
+    </span>
+  );
+}
+
+function ServiceCard({
+  service,
+  logs,
+  startPending,
+  stopPending,
+  onStart,
+  onStop
+}: {
+  service: WorkstreamService;
+  logs: { id: string; message: string; timestamp: string }[];
+  startPending: boolean;
+  stopPending: boolean;
+  onStart: () => void;
+  onStop: () => void;
+}) {
+  const running = service.status === "starting" || service.status === "ready";
+
+  return (
+    <div className="rounded-xl border bg-white p-4 shadow-sm">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="space-y-2">
+          <div className="flex items-center gap-2">
+            <h2 className="font-semibold">{service.name}</h2>
+            <ServiceStatusBadge status={service.status} />
+            <HealthIndicator healthy={service.healthy} />
+          </div>
+          <p className="font-mono text-xs text-slate-500">{service.command}</p>
+          <a
+            className="text-sm text-blue-600 hover:underline"
+            href={service.localUrl}
+            rel="noreferrer"
+            target="_blank"
+          >
+            {service.localUrl}
+          </a>
+        </div>
+
+        {running ? (
+          <Button variant="outline" onClick={onStop} disabled={stopPending}>
+            {stopPending ? "Stopping..." : "Stop"}
+          </Button>
+        ) : (
+          <Button onClick={onStart} disabled={startPending}>
+            {startPending ? "Starting..." : "Start"}
+          </Button>
+        )}
+      </div>
+
+      <div className="mt-4 rounded-lg bg-slate-950 p-3 font-mono text-xs text-slate-100">
+        {logs.length > 0 ? (
+          <ul className="max-h-48 space-y-1 overflow-auto">
+            {logs.map((event) => (
+              <li key={event.id}>
+                <span className="text-slate-500">
+                  {formatTime(event.timestamp)}
+                </span>{" "}
+                {event.message.replace(`[${service.name}] `, "")}
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="text-slate-500">No service logs yet.</p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ServiceStatusBadge({ status }: { status: ServiceStatus }) {
+  const className = {
+    stopped: "bg-slate-100 text-slate-700",
+    starting: "bg-amber-100 text-amber-700",
+    ready: "bg-emerald-100 text-emerald-700",
+    failed: "bg-red-100 text-red-700"
+  }[status];
+
+  return (
+    <span className={`rounded-full px-2 py-1 text-xs font-medium ${className}`}>
+      {status}
+    </span>
+  );
+}
+
+function HealthIndicator({ healthy }: { healthy: boolean }) {
+  return (
+    <span className="flex items-center gap-1 text-xs text-slate-600">
+      <span
+        className={`h-2 w-2 rounded-full ${
+          healthy ? "bg-emerald-500" : "bg-slate-300"
+        }`}
+      />
+      {healthy ? "healthy" : "not healthy"}
     </span>
   );
 }

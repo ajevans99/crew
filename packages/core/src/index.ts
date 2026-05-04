@@ -10,6 +10,15 @@ export type Workstream = {
   id: string;
   createdAt: string;
   status: WorkstreamStatus;
+  portBase: number;
+};
+
+export type ServiceDefinition = {
+  name: string;
+  command: string;
+  cwd: string;
+  portEnvName: string;
+  healthUrl: string;
 };
 
 export type WorkstreamEvent = {
@@ -24,6 +33,7 @@ type WorkstreamRow = {
   id: string;
   created_at: string;
   status: WorkstreamStatus;
+  port_base: number;
 };
 
 type EventRow = {
@@ -60,12 +70,18 @@ export function createWorkstream(db = getDatabase()): Workstream {
   const workstream: Workstream = {
     id: randomUUID(),
     createdAt: new Date().toISOString(),
-    status: "idle"
+    status: "idle",
+    portBase: nextPortBase(db)
   };
 
   db.prepare(
-    "INSERT INTO workstreams (id, created_at, status) VALUES (?, ?, ?)"
-  ).run(workstream.id, workstream.createdAt, workstream.status);
+    "INSERT INTO workstreams (id, created_at, status, port_base) VALUES (?, ?, ?, ?)"
+  ).run(
+    workstream.id,
+    workstream.createdAt,
+    workstream.status,
+    workstream.portBase
+  );
 
   return workstream;
 }
@@ -73,7 +89,7 @@ export function createWorkstream(db = getDatabase()): Workstream {
 export function listWorkstreams(db = getDatabase()): Workstream[] {
   const rows = db
     .prepare(
-      `SELECT id, created_at, status
+      `SELECT id, created_at, status, port_base
        FROM workstreams
        ORDER BY created_at DESC`
     )
@@ -88,7 +104,7 @@ export function getWorkstream(
 ): Workstream {
   const row = db
     .prepare(
-      `SELECT id, created_at, status
+      `SELECT id, created_at, status, port_base
        FROM workstreams
        WHERE id = ?`
     )
@@ -132,7 +148,7 @@ export async function runHelloCommand(
       command: "echo",
       args: ["hello"],
       onLine: (line) => {
-        const event = createEvent(workstreamId, line, db);
+        const event = appendEvent(workstreamId, line, db);
         onEvent?.(event);
       }
     });
@@ -150,7 +166,8 @@ function migrate(db: Database.Database) {
     CREATE TABLE IF NOT EXISTS workstreams (
       id TEXT PRIMARY KEY,
       created_at TEXT NOT NULL,
-      status TEXT NOT NULL CHECK (status IN ('idle', 'running'))
+      status TEXT NOT NULL CHECK (status IN ('idle', 'running')),
+      port_base INTEGER NOT NULL
     );
 
     CREATE TABLE IF NOT EXISTS events (
@@ -162,6 +179,18 @@ function migrate(db: Database.Database) {
       FOREIGN KEY (workstream_id) REFERENCES workstreams(id)
     );
   `);
+
+  const columns = db.prepare("PRAGMA table_info(workstreams)").all() as {
+    name: string;
+  }[];
+  if (!columns.some((column) => column.name === "port_base")) {
+    db.exec("ALTER TABLE workstreams ADD COLUMN port_base INTEGER");
+    db.exec(`
+      UPDATE workstreams
+      SET port_base = 4100 + ((rowid - 1) * 10)
+      WHERE port_base IS NULL
+    `);
+  }
 }
 
 function ensureWorkstreamExists(workstreamId: string, db: Database.Database) {
@@ -185,11 +214,13 @@ function setWorkstreamStatus(
   );
 }
 
-function createEvent(
+export function appendEvent(
   workstreamId: string,
   message: string,
-  db: Database.Database
+  db = getDatabase()
 ): WorkstreamEvent {
+  ensureWorkstreamExists(workstreamId, db);
+
   const event: WorkstreamEvent = {
     id: randomUUID(),
     workstreamId,
@@ -281,6 +312,15 @@ function toWorkstream(row: WorkstreamRow): Workstream {
   return {
     id: row.id,
     createdAt: row.created_at,
-    status: row.status
+    status: row.status,
+    portBase: row.port_base
   };
+}
+
+function nextPortBase(db: Database.Database) {
+  const row = db
+    .prepare("SELECT MAX(port_base) as max_port_base FROM workstreams")
+    .get() as { max_port_base: number | null };
+
+  return row.max_port_base === null ? 4100 : row.max_port_base + 10;
 }
