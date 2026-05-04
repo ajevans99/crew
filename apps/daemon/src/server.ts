@@ -5,11 +5,16 @@ import type { Readable } from "node:stream";
 import Fastify from "fastify";
 import {
   appendEvent,
+  appendTypedEvent,
+  createAgentRun,
   createWorkstream,
   getEvents,
   getWorkstream,
+  listAgentRuns,
   listWorkstreams,
   runHelloCommand,
+  updateAgentRunStatus,
+  type AgentRun,
   WorkstreamNotFoundError,
   type ServiceDefinition,
   type WorkstreamEvent
@@ -40,6 +45,7 @@ const fastify = Fastify({ logger: true });
 const runningWorkstreams = new Set<string>();
 const subscribers = new Map<string, Set<(event: WorkstreamEvent) => void>>();
 const services = new Map<string, ManagedService>();
+const activeAgentRuns = new Set<string>();
 const repoRoot =
   process.env.CREW_REPO_ROOT ??
   resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
@@ -52,6 +58,8 @@ const serviceDefinitions: ServiceDefinition[] = [
     healthUrl: "http://localhost:{port}/"
   }
 ];
+const copilotInspectPrompt = "Inspect this repo and summarize what you see";
+const copilotInspectCommand = `copilot --prompt "${copilotInspectPrompt}"`;
 
 fastify.get("/api/workstreams", async () => {
   return { workstreams: listWorkstreams() };
@@ -100,6 +108,40 @@ fastify.post<{ Params: WorkstreamParams }>(
       return reply.code(500).send({ error: "Failed to run command" });
     } finally {
       runningWorkstreams.delete(id);
+    }
+  }
+);
+
+fastify.get<{ Params: WorkstreamParams }>(
+  "/api/workstreams/:id/agent-runs",
+  async (request, reply) => {
+    try {
+      return { agentRuns: listAgentRuns(request.params.id) };
+    } catch (error) {
+      if (error instanceof WorkstreamNotFoundError) {
+        return reply.code(404).send({ error: "Workstream not found" });
+      }
+
+      request.log.error(error);
+      return reply.code(500).send({ error: "Failed to load agent runs" });
+    }
+  }
+);
+
+fastify.post<{ Params: WorkstreamParams }>(
+  "/api/workstreams/:id/agent-runs",
+  async (request, reply) => {
+    try {
+      const agentRun = createAgentRun(request.params.id, copilotInspectCommand);
+      startAgentRun(agentRun);
+      return { agentRun: updateAgentRunStatus(agentRun.id, "running") };
+    } catch (error) {
+      if (error instanceof WorkstreamNotFoundError) {
+        return reply.code(404).send({ error: "Workstream not found" });
+      }
+
+      request.log.error(error);
+      return reply.code(500).send({ error: "Failed to start agent run" });
     }
   }
 );
@@ -253,6 +295,117 @@ function removeSubscriber(
   if (workstreamSubscribers.size === 0) {
     subscribers.delete(workstreamId);
   }
+}
+
+function startAgentRun(agentRun: AgentRun) {
+  if (activeAgentRuns.has(agentRun.id)) {
+    return;
+  }
+
+  activeAgentRuns.add(agentRun.id);
+  updateAgentRunStatus(agentRun.id, "running");
+  logAgentEvent(agentRun.workstreamId, "agent.run.started", agentRun.command);
+
+  const child = spawn("copilot", ["--prompt", copilotInspectPrompt], {
+    cwd: repoRoot,
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+
+  let finalized = false;
+
+  if (child.stdout) {
+    streamAgentOutput(agentRun.workstreamId, child.stdout);
+  }
+  if (child.stderr) {
+    streamAgentOutput(agentRun.workstreamId, child.stderr);
+  }
+
+  child.once("error", (error) => {
+    if (finalized) {
+      return;
+    }
+
+    finalized = true;
+    activeAgentRuns.delete(agentRun.id);
+    updateAgentRunStatus(agentRun.id, "failed");
+    logAgentEvent(agentRun.workstreamId, "agent.run.failed", error.message);
+  });
+
+  child.once("close", (code, signal) => {
+    if (finalized) {
+      return;
+    }
+
+    finalized = true;
+    activeAgentRuns.delete(agentRun.id);
+
+    if (code === 0) {
+      updateAgentRunStatus(agentRun.id, "completed");
+      logAgentEvent(
+        agentRun.workstreamId,
+        "agent.run.completed",
+        `completed with code ${code}`
+      );
+      return;
+    }
+
+    updateAgentRunStatus(agentRun.id, "failed");
+    logAgentEvent(
+      agentRun.workstreamId,
+      "agent.run.failed",
+      `failed with code ${code ?? "null"} and signal ${signal ?? "null"}`
+    );
+  });
+}
+
+function streamAgentOutput(workstreamId: string, stream: Readable) {
+  stream.setEncoding("utf8");
+  let buffer = "";
+  let flushTimer: NodeJS.Timeout | undefined;
+
+  const flush = () => {
+    if (flushTimer) {
+      clearTimeout(flushTimer);
+      flushTimer = undefined;
+    }
+
+    const message = normalizeAgentOutput(buffer);
+    buffer = "";
+
+    if (message.length > 0) {
+      logAgentEvent(workstreamId, "agent.output.chunk", message);
+    }
+  };
+
+  stream.on("data", (chunk: string) => {
+    buffer += chunk;
+
+    if (buffer.length > 2000) {
+      flush();
+      return;
+    }
+
+    if (!flushTimer) {
+      flushTimer = setTimeout(flush, 500);
+    }
+  });
+  stream.once("end", flush);
+}
+
+function normalizeAgentOutput(output: string) {
+  return output
+    .replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, "")
+    .replace(/\r/g, "")
+    .trim();
+}
+
+function logAgentEvent(
+  workstreamId: string,
+  type: "agent.run.started" | "agent.output.chunk" | "agent.run.completed" | "agent.run.failed",
+  message: string
+) {
+  const event = appendTypedEvent(workstreamId, type, message);
+  publishEvent(workstreamId, event);
 }
 
 class ServiceNotFoundError extends Error {

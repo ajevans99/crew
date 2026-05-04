@@ -1,10 +1,12 @@
 import { useEffect } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import type { WorkstreamStatus } from "@crew/core";
+import type { AgentRun, WorkstreamEvent, WorkstreamStatus } from "@crew/core";
 import {
+  createAgentRun,
   createWorkstream,
   getEvents,
   getWorkstream,
+  listAgentRuns,
   listServices,
   listWorkstreams,
   runCommand,
@@ -53,6 +55,13 @@ export function HomePage() {
   const servicesQuery = useQuery({
     queryKey: ["services", selectedWorkstreamId],
     queryFn: () => listServices(selectedWorkstreamId!),
+    enabled: selectedExists,
+    refetchInterval: 1000
+  });
+
+  const agentRunsQuery = useQuery({
+    queryKey: ["agent-runs", selectedWorkstreamId],
+    queryFn: () => listAgentRuns(selectedWorkstreamId!),
     enabled: selectedExists,
     refetchInterval: 1000
   });
@@ -131,17 +140,40 @@ export function HomePage() {
     }
   });
 
+  const createAgentRunMutation = useMutation({
+    mutationFn: createAgentRun,
+    onSuccess: () => {
+      if (selectedWorkstreamId) {
+        queryClient.invalidateQueries({
+          queryKey: ["agent-runs", selectedWorkstreamId]
+        });
+        queryClient.invalidateQueries({
+          queryKey: ["events", selectedWorkstreamId]
+        });
+      }
+    }
+  });
+
   const selectedWorkstream = selectedWorkstreamQuery.data;
   const events = eventsQuery.data ?? [];
   const services = servicesQuery.data ?? [];
+  const agentRuns = agentRunsQuery.data ?? [];
+  const activeAgentRun =
+    agentRuns.find(
+      (agentRun) =>
+        agentRun.status === "queued" || agentRun.status === "running"
+    ) ?? agentRuns[0];
+  const agentEvents = events.filter((event) => event.type.startsWith("agent."));
   const error =
     createWorkstreamMutation.error ??
     runCommandMutation.error ??
     startServiceMutation.error ??
     stopServiceMutation.error ??
+    createAgentRunMutation.error ??
     workstreamsQuery.error ??
     selectedWorkstreamQuery.error ??
     servicesQuery.error ??
+    agentRunsQuery.error ??
     eventsQuery.error;
 
   const canRun =
@@ -239,6 +271,18 @@ export function HomePage() {
                   ? "Running..."
                   : "Run Command"}
               </Button>
+              <Button
+                variant="outline"
+                onClick={() =>
+                  selectedWorkstreamId &&
+                  createAgentRunMutation.mutate(selectedWorkstreamId)
+                }
+                disabled={!selectedWorkstreamId || createAgentRunMutation.isPending}
+              >
+                {createAgentRunMutation.isPending
+                  ? "Starting Copilot..."
+                  : "Run Copilot Inspect"}
+              </Button>
             </div>
           </CardHeader>
 
@@ -250,7 +294,7 @@ export function HomePage() {
             ) : null}
 
             {selectedWorkstreamId ? (
-              <div className="grid gap-4 lg:grid-cols-2">
+              <div className="grid gap-4 xl:grid-cols-2">
                 {services.map((service) => (
                   <ServiceCard
                     key={service.name}
@@ -282,6 +326,16 @@ export function HomePage() {
                     }
                   />
                 ))}
+                {activeAgentRun ? (
+                  <AgentRunCard agentRun={activeAgentRun} events={agentEvents} />
+                ) : (
+                  <div className="rounded-xl border bg-white p-4 shadow-sm">
+                    <h2 className="font-semibold">Agent run</h2>
+                    <p className="mt-2 text-sm text-slate-500">
+                      Run Copilot Inspect to capture the first agent output.
+                    </p>
+                  </div>
+                )}
               </div>
             ) : null}
 
@@ -294,7 +348,8 @@ export function HomePage() {
                         <span className="text-slate-500">
                           {formatTime(event.timestamp)}
                         </span>{" "}
-                        {event.message}
+                        <span className="text-slate-400">{event.type}</span>{" "}
+                        <span className="whitespace-pre-wrap">{event.message}</span>
                       </li>
                     ))}
                   </ul>
@@ -396,6 +451,70 @@ function ServiceCard({
   );
 }
 
+function AgentRunCard({
+  agentRun,
+  events
+}: {
+  agentRun: AgentRun;
+  events: WorkstreamEvent[];
+}) {
+  const outputTranscript = formatAgentTranscript(
+    events
+      .filter((event) => event.type === "agent.output.chunk")
+      .map((event) => event.message)
+      .join("")
+  );
+
+  return (
+    <div className="rounded-xl border bg-white p-4 shadow-sm">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0 space-y-2">
+          <div className="flex items-center gap-2">
+            <h2 className="font-semibold">Agent run</h2>
+            <AgentRunStatusBadge status={agentRun.status} />
+          </div>
+          <p className="font-mono text-xs text-slate-500">
+            {agentRun.command}
+          </p>
+          <p className="text-xs text-slate-500">
+            {agentRun.startedAt
+              ? `Started ${formatDate(agentRun.startedAt)}`
+              : "Queued"}
+            {agentRun.completedAt
+              ? ` · Completed ${formatDate(agentRun.completedAt)}`
+              : null}
+          </p>
+        </div>
+      </div>
+
+      <div className="mt-4 rounded-lg bg-slate-950 p-3 font-mono text-xs text-slate-100">
+        {outputTranscript.length > 0 ? (
+          <pre className="max-h-48 overflow-auto whitespace-pre-wrap">
+            {outputTranscript}
+          </pre>
+        ) : (
+          <p className="text-slate-500">No agent output yet.</p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function AgentRunStatusBadge({ status }: { status: AgentRun["status"] }) {
+  const className = {
+    queued: "bg-slate-100 text-slate-700",
+    running: "bg-blue-100 text-blue-700",
+    completed: "bg-emerald-100 text-emerald-700",
+    failed: "bg-red-100 text-red-700"
+  }[status];
+
+  return (
+    <span className={`rounded-full px-2 py-1 text-xs font-medium ${className}`}>
+      {status}
+    </span>
+  );
+}
+
 function ServiceStatusBadge({ status }: { status: ServiceStatus }) {
   const className = {
     stopped: "bg-slate-100 text-slate-700",
@@ -443,4 +562,17 @@ function formatTime(value: string) {
     minute: "2-digit",
     second: "2-digit"
   }).format(new Date(value));
+}
+
+function formatAgentTranscript(value: string) {
+  return value
+    .replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, "")
+    .replace(/\r/g, "")
+    .replace(/[ \t]*\n[ \t]*/g, " ")
+    .replace(/(\d)\s+(?=\d)/g, "$1")
+    .replace(/([`([{])\s+/g, "$1")
+    .replace(/`\s*([^`]*?)\s*`/g, "`$1`")
+    .replace(/\s+([\])}.,;:!?])/g, "$1")
+    .replace(/[ \t]{2,}/g, " ")
+    .trim();
 }

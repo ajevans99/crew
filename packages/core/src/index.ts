@@ -21,10 +21,28 @@ export type ServiceDefinition = {
   healthUrl: string;
 };
 
+export type AgentRunStatus = "queued" | "running" | "completed" | "failed";
+
+export type AgentRun = {
+  id: string;
+  workstreamId: string;
+  status: AgentRunStatus;
+  command: string;
+  startedAt: string | null;
+  completedAt: string | null;
+};
+
+export type WorkstreamEventType =
+  | "log"
+  | "agent.run.started"
+  | "agent.output.chunk"
+  | "agent.run.completed"
+  | "agent.run.failed";
+
 export type WorkstreamEvent = {
   id: string;
   workstreamId: string;
-  type: "log";
+  type: WorkstreamEventType;
   message: string;
   timestamp: string;
 };
@@ -39,9 +57,18 @@ type WorkstreamRow = {
 type EventRow = {
   id: string;
   workstream_id: string;
-  type: "log";
+  type: WorkstreamEventType;
   message: string;
   timestamp: string;
+};
+
+type AgentRunRow = {
+  id: string;
+  workstream_id: string;
+  status: AgentRunStatus;
+  command: string;
+  started_at: string | null;
+  completed_at: string | null;
 };
 
 const databases = new Map<string, Database.Database>();
@@ -135,6 +162,97 @@ export function getEvents(
   return rows.map(toEvent);
 }
 
+export function createAgentRun(
+  workstreamId: string,
+  command: string,
+  db = getDatabase()
+): AgentRun {
+  ensureWorkstreamExists(workstreamId, db);
+
+  const agentRun: AgentRun = {
+    id: randomUUID(),
+    workstreamId,
+    status: "queued",
+    command,
+    startedAt: null,
+    completedAt: null
+  };
+
+  db.prepare(
+    `INSERT INTO agent_runs (id, workstream_id, status, command, started_at, completed_at)
+     VALUES (?, ?, ?, ?, ?, ?)`
+  ).run(
+    agentRun.id,
+    agentRun.workstreamId,
+    agentRun.status,
+    agentRun.command,
+    agentRun.startedAt,
+    agentRun.completedAt
+  );
+
+  return agentRun;
+}
+
+export function listAgentRuns(
+  workstreamId: string,
+  db = getDatabase()
+): AgentRun[] {
+  ensureWorkstreamExists(workstreamId, db);
+
+  const rows = db
+    .prepare(
+      `SELECT id, workstream_id, status, command, started_at, completed_at
+       FROM agent_runs
+       WHERE workstream_id = ?
+       ORDER BY rowid DESC`
+    )
+    .all(workstreamId) as AgentRunRow[];
+
+  return rows.map(toAgentRun);
+}
+
+export function updateAgentRunStatus(
+  agentRunId: string,
+  status: AgentRunStatus,
+  db = getDatabase()
+): AgentRun {
+  const current = db
+    .prepare(
+      `SELECT id, workstream_id, status, command, started_at, completed_at
+       FROM agent_runs
+       WHERE id = ?`
+    )
+    .get(agentRunId) as AgentRunRow | undefined;
+
+  if (!current) {
+    throw new Error(`Agent run not found: ${agentRunId}`);
+  }
+
+  const startedAt =
+    status === "running" && current.started_at === null
+      ? new Date().toISOString()
+      : current.started_at;
+  const completedAt =
+    status === "completed" || status === "failed"
+      ? new Date().toISOString()
+      : current.completed_at;
+
+  db.prepare(
+    `UPDATE agent_runs
+     SET status = ?, started_at = ?, completed_at = ?
+     WHERE id = ?`
+  ).run(status, startedAt, completedAt, agentRunId);
+
+  return {
+    id: current.id,
+    workstreamId: current.workstream_id,
+    command: current.command,
+    status,
+    startedAt,
+    completedAt
+  };
+}
+
 export async function runHelloCommand(
   workstreamId: string,
   db = getDatabase(),
@@ -178,6 +296,16 @@ function migrate(db: Database.Database) {
       timestamp TEXT NOT NULL,
       FOREIGN KEY (workstream_id) REFERENCES workstreams(id)
     );
+
+    CREATE TABLE IF NOT EXISTS agent_runs (
+      id TEXT PRIMARY KEY,
+      workstream_id TEXT NOT NULL,
+      status TEXT NOT NULL CHECK (status IN ('queued', 'running', 'completed', 'failed')),
+      command TEXT NOT NULL,
+      started_at TEXT,
+      completed_at TEXT,
+      FOREIGN KEY (workstream_id) REFERENCES workstreams(id)
+    );
   `);
 
   const columns = db.prepare("PRAGMA table_info(workstreams)").all() as {
@@ -219,20 +347,35 @@ export function appendEvent(
   message: string,
   db = getDatabase()
 ): WorkstreamEvent {
+  return appendTypedEvent(workstreamId, "log", message, db);
+}
+
+export function appendTypedEvent(
+  workstreamId: string,
+  type: WorkstreamEventType,
+  message: string,
+  db = getDatabase()
+): WorkstreamEvent {
   ensureWorkstreamExists(workstreamId, db);
 
   const event: WorkstreamEvent = {
     id: randomUUID(),
     workstreamId,
-    type: "log",
+    type,
     message,
     timestamp: new Date().toISOString()
   };
 
   db.prepare(
     `INSERT INTO events (id, workstream_id, type, message, timestamp)
-     VALUES (?, ?, 'log', ?, ?)`
-  ).run(event.id, event.workstreamId, event.message, event.timestamp);
+     VALUES (?, ?, ?, ?, ?)`
+  ).run(
+    event.id,
+    event.workstreamId,
+    event.type,
+    event.message,
+    event.timestamp
+  );
 
   return event;
 }
@@ -314,6 +457,17 @@ function toWorkstream(row: WorkstreamRow): Workstream {
     createdAt: row.created_at,
     status: row.status,
     portBase: row.port_base
+  };
+}
+
+function toAgentRun(row: AgentRunRow): AgentRun {
+  return {
+    id: row.id,
+    workstreamId: row.workstream_id,
+    status: row.status,
+    command: row.command,
+    startedAt: row.started_at,
+    completedAt: row.completed_at
   };
 }
 

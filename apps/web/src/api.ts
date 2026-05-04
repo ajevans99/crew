@@ -1,4 +1,4 @@
-import type { Workstream, WorkstreamEvent } from "@crew/core";
+import type { AgentRun, Workstream, WorkstreamEvent } from "@crew/core";
 
 export type ServiceStatus = "stopped" | "starting" | "ready" | "failed";
 
@@ -110,4 +110,26 @@ export async function stopService({
 
   const data = (await response.json()) as { service: WorkstreamService };
   return data.service;
+}
+
+export async function listAgentRuns(workstreamId: string) {
+  const response = await fetch(`/api/workstreams/${workstreamId}/agent-runs`);
+  if (!response.ok) {
+    throw new Error("Failed to load agent runs");
+  }
+
+  const data = (await response.json()) as { agentRuns: AgentRun[] };
+  return data.agentRuns;
+}
+
+export async function createAgentRun(workstreamId: string) {
+  const response = await fetch(`/api/workstreams/${workstreamId}/agent-runs`, {
+    method: "POST"
+  });
+  if (!response.ok) {
+    throw new Error("Failed to start agent run");
+  }
+
+  const data = (await response.json()) as { agentRun: AgentRun };
+  return data.agentRun;
 }
