@@ -1,6 +1,12 @@
-import { useEffect } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import type { AgentRun, WorkstreamEvent, WorkstreamStatus } from "@crew/core";
+import type {
+  AgentRun,
+  WorkstreamEvent,
+  WorkstreamEventActorType,
+  WorkstreamEventType,
+  WorkstreamStatus
+} from "@crew/core";
 import {
   createAgentRun,
   createWorkstream,
@@ -21,6 +27,14 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 
 export function HomePage() {
   const queryClient = useQueryClient();
+  const [actorFilter, setActorFilter] = useState<"all" | WorkstreamEventActorType>(
+    "all"
+  );
+  const [typeFilter, setTypeFilter] = useState<"all" | WorkstreamEventType>(
+    "all"
+  );
+  const [autoScroll, setAutoScroll] = useState(true);
+  const timelineEndRef = useRef<HTMLDivElement | null>(null);
   const {
     selectedWorkstreamId,
     sidebarCollapsed,
@@ -164,6 +178,33 @@ export function HomePage() {
         agentRun.status === "queued" || agentRun.status === "running"
     ) ?? agentRuns[0];
   const agentEvents = events.filter((event) => event.type.startsWith("agent."));
+  const actorOptions = useMemo(
+    () => Array.from(new Set(events.map((event) => event.actorType))).sort(),
+    [events]
+  );
+  const typeOptions = useMemo(
+    () => Array.from(new Set(events.map((event) => event.type))).sort(),
+    [events]
+  );
+  const filteredEvents = useMemo(
+    () =>
+      events.filter(
+        (event) =>
+          (actorFilter === "all" || event.actorType === actorFilter) &&
+          (typeFilter === "all" || event.type === typeFilter)
+      ),
+    [actorFilter, events, typeFilter]
+  );
+  const eventGroups = useMemo(
+    () => groupTimelineEvents(filteredEvents),
+    [filteredEvents]
+  );
+
+  useEffect(() => {
+    if (autoScroll) {
+      timelineEndRef.current?.scrollIntoView({ block: "end" });
+    }
+  }, [autoScroll, filteredEvents.length]);
   const error =
     createWorkstreamMutation.error ??
     runCommandMutation.error ??
@@ -301,7 +342,8 @@ export function HomePage() {
                     service={service}
                     logs={events
                       .filter((event) =>
-                        event.message.startsWith(`[${service.name}]`)
+                        event.actorType === "service" &&
+                        event.actorId === service.name
                       )
                       .slice(-12)}
                     startPending={
@@ -339,27 +381,19 @@ export function HomePage() {
               </div>
             ) : null}
 
-            <div className="min-h-[24rem] flex-1 overflow-auto rounded-lg bg-slate-950 p-4 font-mono text-sm text-slate-100">
-              {selectedWorkstreamId ? (
-                events.length > 0 ? (
-                  <ul className="space-y-1">
-                    {events.map((event) => (
-                      <li key={event.id}>
-                        <span className="text-slate-500">
-                          {formatTime(event.timestamp)}
-                        </span>{" "}
-                        <span className="text-slate-400">{event.type}</span>{" "}
-                        <span className="whitespace-pre-wrap">{event.message}</span>
-                      </li>
-                    ))}
-                  </ul>
-                ) : (
-                  <p className="text-slate-500">No logs yet.</p>
-                )
-              ) : (
-                <p className="text-slate-500">No workstream selected.</p>
-              )}
-            </div>
+            <TimelinePanel
+              actorFilter={actorFilter}
+              actorOptions={actorOptions}
+              autoScroll={autoScroll}
+              eventGroups={eventGroups}
+              selectedWorkstreamId={selectedWorkstreamId}
+              setActorFilter={setActorFilter}
+              setAutoScroll={setAutoScroll}
+              setTypeFilter={setTypeFilter}
+              timelineEndRef={timelineEndRef}
+              typeFilter={typeFilter}
+              typeOptions={typeOptions}
+            />
           </CardContent>
         </Card>
       </section>
@@ -392,7 +426,7 @@ function ServiceCard({
   onStop
 }: {
   service: WorkstreamService;
-  logs: { id: string; message: string; timestamp: string }[];
+  logs: WorkstreamEvent[];
   startPending: boolean;
   stopPending: boolean;
   onStart: () => void;
@@ -437,9 +471,9 @@ function ServiceCard({
             {logs.map((event) => (
               <li key={event.id}>
                 <span className="text-slate-500">
-                  {formatTime(event.timestamp)}
+                  {formatTime(event.createdAt)}
                 </span>{" "}
-                {event.message.replace(`[${service.name}] `, "")}
+                {event.message}
               </li>
             ))}
           </ul>
@@ -448,6 +482,175 @@ function ServiceCard({
         )}
       </div>
     </div>
+  );
+}
+
+type TimelineEventGroup = {
+  id: string;
+  actorType: WorkstreamEventActorType;
+  actorId: string;
+  type: WorkstreamEventType;
+  createdAt: string;
+  events: WorkstreamEvent[];
+};
+
+function TimelinePanel({
+  actorFilter,
+  actorOptions,
+  autoScroll,
+  eventGroups,
+  selectedWorkstreamId,
+  setActorFilter,
+  setAutoScroll,
+  setTypeFilter,
+  timelineEndRef,
+  typeFilter,
+  typeOptions
+}: {
+  actorFilter: "all" | WorkstreamEventActorType;
+  actorOptions: WorkstreamEventActorType[];
+  autoScroll: boolean;
+  eventGroups: TimelineEventGroup[];
+  selectedWorkstreamId: string | null;
+  setActorFilter: (actorType: "all" | WorkstreamEventActorType) => void;
+  setAutoScroll: (autoScroll: boolean) => void;
+  setTypeFilter: (type: "all" | WorkstreamEventType) => void;
+  timelineEndRef: { current: HTMLDivElement | null };
+  typeFilter: "all" | WorkstreamEventType;
+  typeOptions: WorkstreamEventType[];
+}) {
+  return (
+    <div className="flex min-h-[28rem] flex-1 flex-col overflow-hidden rounded-xl border bg-white">
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b p-4">
+        <div className="flex items-center gap-2">
+          <button className="rounded-md bg-slate-950 px-3 py-1.5 text-sm font-medium text-white">
+            Timeline
+          </button>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-3 text-sm">
+          <label className="flex items-center gap-2">
+            Actor
+            <select
+              className="rounded-md border bg-white px-2 py-1"
+              value={actorFilter}
+              onChange={(event) =>
+                setActorFilter(event.target.value as "all" | WorkstreamEventActorType)
+              }
+            >
+              <option value="all">all</option>
+              {actorOptions.map((actorType) => (
+                <option key={actorType} value={actorType}>
+                  {actorType}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <label className="flex items-center gap-2">
+            Type
+            <select
+              className="max-w-52 rounded-md border bg-white px-2 py-1"
+              value={typeFilter}
+              onChange={(event) =>
+                setTypeFilter(event.target.value as "all" | WorkstreamEventType)
+              }
+            >
+              <option value="all">all</option>
+              {typeOptions.map((type) => (
+                <option key={type} value={type}>
+                  {type}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <label className="flex items-center gap-2">
+            <input
+              checked={autoScroll}
+              onChange={(event) => setAutoScroll(event.target.checked)}
+              type="checkbox"
+            />
+            Auto-scroll
+          </label>
+        </div>
+      </div>
+
+      <div className="flex-1 space-y-3 overflow-auto bg-slate-50 p-4">
+        {selectedWorkstreamId ? (
+          eventGroups.length > 0 ? (
+            eventGroups.map((group) => (
+              <TimelineGroupCard group={group} key={group.id} />
+            ))
+          ) : (
+            <p className="text-sm text-slate-500">No matching events.</p>
+          )
+        ) : (
+          <p className="text-sm text-slate-500">No workstream selected.</p>
+        )}
+        <div ref={timelineEndRef} />
+      </div>
+    </div>
+  );
+}
+
+function TimelineGroupCard({ group }: { group: TimelineEventGroup }) {
+  return (
+    <article className="rounded-xl border bg-white p-4 shadow-sm">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="space-y-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <ActorBadge actorType={group.actorType} />
+            <span className="font-mono text-xs text-slate-500">
+              {group.actorId}
+            </span>
+            <span className="rounded-full bg-slate-100 px-2 py-1 font-mono text-xs text-slate-700">
+              {group.type}
+            </span>
+          </div>
+          <p className="text-xs text-slate-500">
+            {formatDate(group.createdAt)} · {group.events.length} event
+            {group.events.length === 1 ? "" : "s"}
+          </p>
+        </div>
+      </div>
+
+      <div className="mt-4 space-y-3">
+        {group.events.map((event) => (
+          <div className="rounded-lg bg-slate-950 p-3 text-slate-100" key={event.id}>
+            <div className="mb-2 font-mono text-xs text-slate-500">
+              {formatTime(event.createdAt)}
+            </div>
+            <pre className="whitespace-pre-wrap font-mono text-sm">
+              {event.message}
+            </pre>
+            {event.payloadJson ? (
+              <details className="mt-2 text-xs text-slate-400">
+                <summary className="cursor-pointer">payload</summary>
+                <pre className="mt-2 whitespace-pre-wrap">
+                  {formatPayload(event.payloadJson)}
+                </pre>
+              </details>
+            ) : null}
+          </div>
+        ))}
+      </div>
+    </article>
+  );
+}
+
+function ActorBadge({ actorType }: { actorType: WorkstreamEventActorType }) {
+  const className = {
+    system: "bg-slate-100 text-slate-700",
+    service: "bg-purple-100 text-purple-700",
+    agent: "bg-blue-100 text-blue-700",
+    user: "bg-amber-100 text-amber-700"
+  }[actorType];
+
+  return (
+    <span className={`rounded-full px-2 py-1 text-xs font-medium ${className}`}>
+      {actorType}
+    </span>
   );
 }
 
@@ -462,7 +665,7 @@ function AgentRunCard({
     events
       .filter((event) => event.type === "agent.output.chunk")
       .map((event) => event.message)
-      .join("")
+      .join("\n")
   );
 
   return (
@@ -575,4 +778,48 @@ function formatAgentTranscript(value: string) {
     .replace(/\s+([\])}.,;:!?])/g, "$1")
     .replace(/[ \t]{2,}/g, " ")
     .trim();
+}
+
+function groupTimelineEvents(events: WorkstreamEvent[]): TimelineEventGroup[] {
+  const groups: TimelineEventGroup[] = [];
+
+  for (const event of events) {
+    const previous = groups.at(-1);
+    if (previous && shouldAppendToGroup(previous, event)) {
+      previous.events.push(event);
+      continue;
+    }
+
+    groups.push({
+      id: event.id,
+      actorType: event.actorType,
+      actorId: event.actorId,
+      type: event.type,
+      createdAt: event.createdAt,
+      events: [event]
+    });
+  }
+
+  return groups;
+}
+
+function shouldAppendToGroup(
+  group: TimelineEventGroup,
+  event: WorkstreamEvent
+) {
+  return (
+    group.actorType === event.actorType &&
+    group.actorId === event.actorId &&
+    group.type === event.type &&
+    new Date(event.createdAt).getTime() - new Date(group.createdAt).getTime() <
+      60_000
+  );
+}
+
+function formatPayload(payloadJson: string) {
+  try {
+    return JSON.stringify(JSON.parse(payloadJson), null, 2);
+  } catch {
+    return payloadJson;
+  }
 }

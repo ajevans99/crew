@@ -32,19 +32,28 @@ export type AgentRun = {
   completedAt: string | null;
 };
 
+export type WorkstreamEventActorType = "system" | "service" | "agent" | "user";
+
 export type WorkstreamEventType =
-  | "log"
+  | "workstream.created"
+  | "service.started"
+  | "service.output.chunk"
+  | "service.stopped"
   | "agent.run.started"
   | "agent.output.chunk"
   | "agent.run.completed"
-  | "agent.run.failed";
+  | "agent.run.failed"
+  | "user.command.requested";
 
 export type WorkstreamEvent = {
   id: string;
   workstreamId: string;
+  actorType: WorkstreamEventActorType;
+  actorId: string;
   type: WorkstreamEventType;
   message: string;
-  timestamp: string;
+  payloadJson: string | null;
+  createdAt: string;
 };
 
 type WorkstreamRow = {
@@ -57,9 +66,12 @@ type WorkstreamRow = {
 type EventRow = {
   id: string;
   workstream_id: string;
+  actor_type: WorkstreamEventActorType;
+  actor_id: string;
   type: WorkstreamEventType;
   message: string;
-  timestamp: string;
+  payload_json: string | null;
+  created_at: string;
 };
 
 type AgentRunRow = {
@@ -110,6 +122,18 @@ export function createWorkstream(db = getDatabase()): Workstream {
     workstream.portBase
   );
 
+  appendEvent(
+    {
+      workstreamId: workstream.id,
+      actorType: "system",
+      actorId: "crew",
+      type: "workstream.created",
+      message: "Workstream created",
+      payload: { portBase: workstream.portBase }
+    },
+    db
+  );
+
   return workstream;
 }
 
@@ -152,10 +176,10 @@ export function getEvents(
 
   const rows = db
     .prepare(
-      `SELECT id, workstream_id, type, message, timestamp
+      `SELECT id, workstream_id, actor_type, actor_id, type, message, payload_json, created_at
        FROM events
        WHERE workstream_id = ?
-       ORDER BY rowid ASC`
+       ORDER BY created_at ASC, rowid ASC`
     )
     .all(workstreamId) as EventRow[];
 
@@ -261,12 +285,35 @@ export async function runHelloCommand(
   ensureWorkstreamExists(workstreamId, db);
   setWorkstreamStatus(workstreamId, "running", db);
 
+  const requestedEvent = appendEvent(
+    {
+      workstreamId,
+      actorType: "user",
+      actorId: "web",
+      type: "user.command.requested",
+      message: "echo hello",
+      payload: { command: "echo", args: ["hello"] }
+    },
+    db
+  );
+  onEvent?.(requestedEvent);
+
   try {
     await runCommand({
       command: "echo",
       args: ["hello"],
       onLine: (line) => {
-        const event = appendEvent(workstreamId, line, db);
+        const event = appendEvent(
+          {
+            workstreamId,
+            actorType: "system",
+            actorId: "command",
+            type: "user.command.requested",
+            message: line,
+            payload: { command: "echo", stream: "stdout" }
+          },
+          db
+        );
         onEvent?.(event);
       }
     });
@@ -291,9 +338,12 @@ function migrate(db: Database.Database) {
     CREATE TABLE IF NOT EXISTS events (
       id TEXT PRIMARY KEY,
       workstream_id TEXT NOT NULL,
+      actor_type TEXT NOT NULL,
+      actor_id TEXT NOT NULL,
       type TEXT NOT NULL,
       message TEXT NOT NULL,
-      timestamp TEXT NOT NULL,
+      payload_json TEXT,
+      created_at TEXT NOT NULL,
       FOREIGN KEY (workstream_id) REFERENCES workstreams(id)
     );
 
@@ -319,6 +369,56 @@ function migrate(db: Database.Database) {
       WHERE port_base IS NULL
     `);
   }
+
+  const eventColumns = db.prepare("PRAGMA table_info(events)").all() as {
+    name: string;
+  }[];
+  const eventColumnNames = new Set(eventColumns.map((column) => column.name));
+
+  if (!eventColumnNames.has("actor_type")) {
+    db.exec("ALTER TABLE events ADD COLUMN actor_type TEXT");
+  }
+  if (!eventColumnNames.has("actor_id")) {
+    db.exec("ALTER TABLE events ADD COLUMN actor_id TEXT");
+  }
+  if (!eventColumnNames.has("payload_json")) {
+    db.exec("ALTER TABLE events ADD COLUMN payload_json TEXT");
+  }
+  if (!eventColumnNames.has("created_at")) {
+    db.exec("ALTER TABLE events ADD COLUMN created_at TEXT");
+  }
+
+  const legacyCreatedAt = eventColumnNames.has("timestamp")
+    ? "timestamp"
+    : "datetime('now')";
+
+  db.exec(`
+    UPDATE events
+    SET
+      created_at = COALESCE(created_at, ${legacyCreatedAt}, datetime('now')),
+      actor_type = COALESCE(
+        actor_type,
+        CASE
+          WHEN type LIKE 'agent.%' THEN 'agent'
+          WHEN message LIKE '[web]%' THEN 'service'
+          ELSE 'system'
+        END
+      ),
+      actor_id = COALESCE(
+        actor_id,
+        CASE
+          WHEN type LIKE 'agent.%' THEN 'legacy-agent'
+          WHEN message LIKE '[web]%' THEN 'web'
+          ELSE 'crew'
+        END
+      ),
+      type = CASE
+        WHEN type = 'log' AND message LIKE '[web]%' THEN 'service.output.chunk'
+        WHEN type = 'log' THEN 'user.command.requested'
+        ELSE type
+      END
+    WHERE created_at IS NULL OR actor_type IS NULL OR actor_id IS NULL OR type = 'log'
+  `);
 }
 
 function ensureWorkstreamExists(workstreamId: string, db: Database.Database) {
@@ -343,38 +443,44 @@ function setWorkstreamStatus(
 }
 
 export function appendEvent(
-  workstreamId: string,
-  message: string,
+  input: {
+    workstreamId: string;
+    actorType: WorkstreamEventActorType;
+    actorId: string;
+    type: WorkstreamEventType;
+    message: string;
+    payload?: unknown;
+  },
   db = getDatabase()
 ): WorkstreamEvent {
-  return appendTypedEvent(workstreamId, "log", message, db);
-}
-
-export function appendTypedEvent(
-  workstreamId: string,
-  type: WorkstreamEventType,
-  message: string,
-  db = getDatabase()
-): WorkstreamEvent {
-  ensureWorkstreamExists(workstreamId, db);
+  ensureWorkstreamExists(input.workstreamId, db);
 
   const event: WorkstreamEvent = {
     id: randomUUID(),
-    workstreamId,
-    type,
-    message,
-    timestamp: new Date().toISOString()
+    workstreamId: input.workstreamId,
+    actorType: input.actorType,
+    actorId: input.actorId,
+    type: input.type,
+    message: input.message,
+    payloadJson:
+      input.payload === undefined ? null : JSON.stringify(input.payload),
+    createdAt: new Date().toISOString()
   };
 
   db.prepare(
-    `INSERT INTO events (id, workstream_id, type, message, timestamp)
-     VALUES (?, ?, ?, ?, ?)`
+    `INSERT INTO events (
+       id, workstream_id, actor_type, actor_id, type, message, payload_json, created_at
+     )
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     event.id,
     event.workstreamId,
+    event.actorType,
+    event.actorId,
     event.type,
     event.message,
-    event.timestamp
+    event.payloadJson,
+    event.createdAt
   );
 
   return event;
@@ -445,9 +551,12 @@ function toEvent(row: EventRow): WorkstreamEvent {
   return {
     id: row.id,
     workstreamId: row.workstream_id,
+    actorType: row.actor_type,
+    actorId: row.actor_id,
     type: row.type,
     message: row.message,
-    timestamp: row.timestamp
+    payloadJson: row.payload_json,
+    createdAt: row.created_at
   };
 }
 

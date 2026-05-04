@@ -5,7 +5,6 @@ import type { Readable } from "node:stream";
 import Fastify from "fastify";
 import {
   appendEvent,
-  appendTypedEvent,
   createAgentRun,
   createWorkstream,
   getEvents,
@@ -304,7 +303,12 @@ function startAgentRun(agentRun: AgentRun) {
 
   activeAgentRuns.add(agentRun.id);
   updateAgentRunStatus(agentRun.id, "running");
-  logAgentEvent(agentRun.workstreamId, "agent.run.started", agentRun.command);
+  logAgentEvent(
+    agentRun.id,
+    agentRun.workstreamId,
+    "agent.run.started",
+    agentRun.command
+  );
 
   const child = spawn("copilot", ["--prompt", copilotInspectPrompt], {
     cwd: repoRoot,
@@ -314,10 +318,10 @@ function startAgentRun(agentRun: AgentRun) {
   let finalized = false;
 
   if (child.stdout) {
-    streamAgentOutput(agentRun.workstreamId, child.stdout);
+    streamAgentOutput(agentRun.id, agentRun.workstreamId, child.stdout);
   }
   if (child.stderr) {
-    streamAgentOutput(agentRun.workstreamId, child.stderr);
+    streamAgentOutput(agentRun.id, agentRun.workstreamId, child.stderr);
   }
 
   child.once("error", (error) => {
@@ -328,7 +332,12 @@ function startAgentRun(agentRun: AgentRun) {
     finalized = true;
     activeAgentRuns.delete(agentRun.id);
     updateAgentRunStatus(agentRun.id, "failed");
-    logAgentEvent(agentRun.workstreamId, "agent.run.failed", error.message);
+    logAgentEvent(
+      agentRun.id,
+      agentRun.workstreamId,
+      "agent.run.failed",
+      error.message
+    );
   });
 
   child.once("close", (code, signal) => {
@@ -342,6 +351,7 @@ function startAgentRun(agentRun: AgentRun) {
     if (code === 0) {
       updateAgentRunStatus(agentRun.id, "completed");
       logAgentEvent(
+        agentRun.id,
         agentRun.workstreamId,
         "agent.run.completed",
         `completed with code ${code}`
@@ -351,6 +361,7 @@ function startAgentRun(agentRun: AgentRun) {
 
     updateAgentRunStatus(agentRun.id, "failed");
     logAgentEvent(
+      agentRun.id,
       agentRun.workstreamId,
       "agent.run.failed",
       `failed with code ${code ?? "null"} and signal ${signal ?? "null"}`
@@ -358,7 +369,11 @@ function startAgentRun(agentRun: AgentRun) {
   });
 }
 
-function streamAgentOutput(workstreamId: string, stream: Readable) {
+function streamAgentOutput(
+  agentRunId: string,
+  workstreamId: string,
+  stream: Readable
+) {
   stream.setEncoding("utf8");
   let buffer = "";
   let flushTimer: NodeJS.Timeout | undefined;
@@ -373,7 +388,7 @@ function streamAgentOutput(workstreamId: string, stream: Readable) {
     buffer = "";
 
     if (message.length > 0) {
-      logAgentEvent(workstreamId, "agent.output.chunk", message);
+      logAgentEvent(agentRunId, workstreamId, "agent.output.chunk", message);
     }
   };
 
@@ -400,11 +415,19 @@ function normalizeAgentOutput(output: string) {
 }
 
 function logAgentEvent(
+  agentRunId: string,
   workstreamId: string,
   type: "agent.run.started" | "agent.output.chunk" | "agent.run.completed" | "agent.run.failed",
   message: string
 ) {
-  const event = appendTypedEvent(workstreamId, type, message);
+  const event = appendEvent({
+    workstreamId,
+    actorType: "agent",
+    actorId: agentRunId,
+    type,
+    message,
+    payload: { agentRunId }
+  });
   publishEvent(workstreamId, event);
 }
 
@@ -461,6 +484,7 @@ function startService(workstreamId: string, name: string) {
 
   logServiceEvent(
     service,
+    "service.started",
     `starting ${service.definition.command} on port ${service.port}`
   );
 
@@ -486,7 +510,9 @@ function startService(workstreamId: string, name: string) {
     service.status = "failed";
     service.healthy = false;
     clearHealthTimer(service);
-    logServiceEvent(service, `failed to start: ${error.message}`);
+    logServiceEvent(service, "service.stopped", `failed to start: ${error.message}`, {
+      status: "failed"
+    });
   });
 
   child.once("exit", (code, signal) => {
@@ -503,6 +529,7 @@ function startService(workstreamId: string, name: string) {
     service.stopping = false;
     logServiceEvent(
       service,
+      "service.stopped",
       `exited with code ${code ?? "null"} and signal ${signal ?? "null"}`
     );
   });
@@ -520,7 +547,7 @@ function stopService(workstreamId: string, name: string) {
   clearHealthTimer(service);
 
   if (service.process) {
-    logServiceEvent(service, "stopping");
+    logServiceEvent(service, "service.stopped", "stopping");
     service.process.kill("SIGTERM");
 
     const child = service.process;
@@ -564,14 +591,14 @@ function streamServiceOutput(
 
     for (const line of lines) {
       if (line.length > 0) {
-        logServiceEvent(service, line);
+        logServiceEvent(service, "service.output.chunk", line);
       }
     }
   });
 
   stream.once("end", () => {
     if (buffer.length > 0) {
-      logServiceEvent(service, buffer);
+      logServiceEvent(service, "service.output.chunk", buffer);
     }
   });
 }
@@ -603,11 +630,15 @@ async function refreshServiceHealth(service: ManagedService) {
 
   if (healthy && service.status === "starting") {
     service.status = "ready";
-    logServiceEvent(service, `ready at http://localhost:${service.port}`);
+    logServiceEvent(service, "service.started", `ready at http://localhost:${service.port}`);
   }
 
   if (!healthy && wasHealthy) {
-    logServiceEvent(service, `health check failed at ${resolveHealthUrl(service)}`);
+    logServiceEvent(
+      service,
+      "service.output.chunk",
+      `health check failed at ${resolveHealthUrl(service)}`
+    );
   }
 }
 
@@ -620,11 +651,24 @@ async function checkHealth(url: string) {
   }
 }
 
-function logServiceEvent(service: ManagedService, message: string) {
-  const event = appendEvent(
-    service.workstreamId,
-    `[${service.definition.name}] ${message}`
-  );
+function logServiceEvent(
+  service: ManagedService,
+  type: "service.started" | "service.output.chunk" | "service.stopped",
+  message: string,
+  payload?: unknown
+) {
+  const event = appendEvent({
+    workstreamId: service.workstreamId,
+    actorType: "service",
+    actorId: service.definition.name,
+    type,
+    message,
+    payload: {
+      service: service.definition.name,
+      port: service.port,
+      ...((payload && typeof payload === "object") ? payload : {})
+    }
+  });
   publishEvent(service.workstreamId, event);
 }
 
